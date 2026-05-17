@@ -1,0 +1,19 @@
+# Secrets
+.env
+*.env.local
+*.env.production
+
+# Runtime container data (kept in /opt/appdata on host, never in repo)
+appdata/
+data/
+
+# Editor/OS noise
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Backup tarballs
+*.tar.gz
+*.tar
