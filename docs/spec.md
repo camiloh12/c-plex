@@ -72,11 +72,12 @@ Single physical machine, always-on, wired to the home router.
 | UPS | None | 600 VA basic UPS | Prevents corruption from brownouts during writes |
 
 The currently available host is a repurposed ASUS laptop running Ubuntu
-24.04 LTS (upgraded from 20.04.6 in May 2026). It has an Intel 3rd-gen iGPU
-and a discrete NVIDIA GeForce GTX 660M (Kepler, 2012). The discrete GPU is
-too old for modern NVENC and current Nvidia drivers, so Plex hardware
-transcoding uses the Intel iGPU via Quick Sync (see §6.4). The host is
-currently on Wi-Fi (`wlp3s0`).
+Desktop 24.04 LTS (upgraded from 20.04.6 in May 2026); the Desktop edition
+is an accepted alternative to Server, with the required mitigations called
+out in §5.1. It has an Intel 3rd-gen iGPU and a discrete NVIDIA GeForce
+GTX 660M (Kepler, 2012). The discrete GPU is too old for modern NVENC and
+current Nvidia drivers, so Plex hardware transcoding uses the Intel iGPU
+via Quick Sync (see §6.4). The host is currently on Wi-Fi (`wlp3s0`).
 
 ### 4.2 Network (WAN)
 
@@ -101,6 +102,18 @@ currently on Wi-Fi (`wlp3s0`).
 - **Distribution:** Ubuntu Server 24.04 LTS (Noble).
 - **Why:** current LTS, supported through April 2029 (April 2034 with ESM),
   excellent Docker and Nvidia driver support, lowest overhead on 8 GB RAM.
+- **Desktop variant:** Ubuntu Desktop 24.04 LTS is an accepted alternative
+  (shares the same kernel and package archive — all required packages
+  install identically). Trade-offs: GNOME/GDM consume ~1–1.5 GB RAM at
+  idle, which matters on the 8 GB minimum; under Mode A (§6.4) the desktop
+  session also claims the Nvidia GPU and competes with NVENC for encoder
+  slots and VRAM. **Required mitigations on Desktop:**
+  - `sudo systemctl set-default multi-user.target` so the host boots
+    headless; start the GUI on demand with `sudo systemctl isolate
+    graphical.target` only when needed.
+  - Confirm `openssh-server` is installed (it is not on Desktop by default).
+  - Install Docker from Docker's official APT repo, not the `docker` snap
+    that Desktop may suggest.
 - **Required packages:**
   - `docker-ce`, `docker-ce-cli`, `containerd.io`, `docker-compose-plugin`
     (from Docker's official APT repo, not Ubuntu's older `docker.io`)
