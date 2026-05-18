@@ -1,7 +1,7 @@
 # c-plex — Project Specification
 
 **Status:** Living document. Update in place as the project evolves.
-**Last updated:** 2026-05-17
+**Last updated:** 2026-05-18
 
 This document is the single source of truth for what c-plex is, what hardware
 it runs on, what software it uses, and how it is operated. Implementation
@@ -65,15 +65,18 @@ Single physical machine, always-on, wired to the home router.
 |---|---|---|---|
 | CPU | 4 cores / 8 threads, x86_64 | Same or better | All transcoding is offloaded to the GPU when available |
 | RAM | 8 GB | 16 GB | 8 GB works; 16 GB gives real headroom for cache and future additions |
-| GPU | None (CPU-only fallback) | Discrete Nvidia (NVENC-capable) | Pascal (GTX 10xx) or newer recommended for h.265 encode |
+| GPU | None (CPU-only fallback) | Discrete Nvidia (NVENC-capable, Maxwell+) **or** Intel iGPU (Quick Sync, Haswell+) | Pre-Maxwell Nvidia (Kepler, e.g. GTX 660M) is too old for modern drivers and limited to H.264; prefer Intel QSV in that case |
 | OS drive | 50 GB free on internal SSD/HDD | Same | Holds Ubuntu, Docker, and `/opt/appdata` (configs + container DBs) |
 | Media drive | 1× 4 TB external USB 3.0 HDD | Same | ext4. Mounted at `/mnt/media-01`, bind-mounted as `/data` in containers |
-| Network | Wired Gigabit Ethernet | Same | Wi-Fi is not supported for the server |
+| Network | Wired Gigabit Ethernet preferred; Wi-Fi acceptable for low-concurrency household use | Wired Gigabit Ethernet | Wi-Fi adds latency and limits aggregate stream throughput; the initial deployment runs on Wi-Fi and may move to Ethernet later |
 | UPS | None | 600 VA basic UPS | Prevents corruption from brownouts during writes |
 
-The currently available host is a repurposed laptop with Ubuntu 20.04.6 LTS
-installed. It will be upgraded to Ubuntu 24.04 LTS before deployment (see
-§5.1).
+The currently available host is a repurposed ASUS laptop running Ubuntu
+24.04 LTS (upgraded from 20.04.6 in May 2026). It has an Intel 3rd-gen iGPU
+and a discrete NVIDIA GeForce GTX 660M (Kepler, 2012). The discrete GPU is
+too old for modern NVENC and current Nvidia drivers, so Plex hardware
+transcoding uses the Intel iGPU via Quick Sync (see §6.4). The host is
+currently on Wi-Fi (`wlp3s0`).
 
 ### 4.2 Network (WAN)
 
@@ -101,9 +104,15 @@ installed. It will be upgraded to Ubuntu 24.04 LTS before deployment (see
 - **Required packages:**
   - `docker-ce`, `docker-ce-cli`, `containerd.io`, `docker-compose-plugin`
     (from Docker's official APT repo, not Ubuntu's older `docker.io`)
-  - `nvidia-driver-535-server` or newer (proprietary)
-  - `nvidia-container-toolkit`
-  - `ufw`, `unattended-upgrades`, `openssh-server`
+  - `ufw`, `unattended-upgrades`
+  - `openssh-server` (only if remote SSH admin is needed; not installed on
+    a host accessed only at the console)
+- **Optional packages (GPU transcoding):**
+  - For NVENC: `nvidia-driver-535-server` or newer, plus
+    `nvidia-container-toolkit`. Requires Maxwell-or-newer Nvidia GPU.
+  - For Intel Quick Sync: no extra packages — `/dev/dri` is provided by
+    the kernel's `i915` driver. The Plex container needs `/dev/dri`
+    passthrough and `video`/`render` group membership.
 - **User model:** all containers run as a single non-root UID/GID
   (`PUID=1000`, `PGID=1000`) that owns `/data` and `/opt/appdata` on the
   host. Container file ownership matches host user ownership.
@@ -285,17 +294,25 @@ The spec supports both modes. Operators choose at deployment time based on
 whether they hold a Plex Pass.
 
 **Mode A — Plex Pass present (recommended).**
-The Plex container is granted GPU access via `runtime: nvidia` with env
-vars `NVIDIA_VISIBLE_DEVICES=all` and
-`NVIDIA_DRIVER_CAPABILITIES=compute,video,utility`. In Plex Settings →
-Transcoder, "Use hardware acceleration when available" and
-"Use hardware-accelerated video encoding" are enabled. The transcode
-working directory is set to a tmpfs mount to spare the HDD. NVENC
-comfortably handles 4-6 concurrent 1080p transcodes on the spec'd hardware.
+The Plex container is granted GPU access and "Use hardware acceleration
+when available" + "Use hardware-accelerated video encoding" are enabled in
+Plex Settings → Transcoder. The transcode working directory is set to a
+tmpfs mount to spare the HDD. The exact compose-file configuration depends
+on which GPU is in use:
 
-For older consumer Nvidia GPUs, the proprietary driver limits NVENC to 3
-concurrent sessions. The `keylase/nvidia-patch` community patch removes
-this cap and is recommended only if the limit is hit in practice.
+- **Mode A-NVENC (discrete Nvidia, Maxwell or newer):** `runtime: nvidia`
+  with env vars `NVIDIA_VISIBLE_DEVICES=all` and
+  `NVIDIA_DRIVER_CAPABILITIES=compute,video,utility`. NVENC comfortably
+  handles 4-6 concurrent 1080p transcodes. For older consumer Nvidia GPUs
+  the proprietary driver caps NVENC at 3 concurrent sessions; the
+  `keylase/nvidia-patch` community patch removes this if needed.
+- **Mode A-QSV (Intel iGPU, Haswell or newer):** `devices: [/dev/dri:/dev/dri]`
+  and `group_add: [video, render]` (resolved to the host's group GIDs).
+  No driver install needed — `i915` ships with the kernel. Quick Sync on
+  3rd-gen iGPU handles ~2 concurrent 1080p H.264 transcodes; newer iGPUs
+  do significantly more. **This is the path used on the current host**,
+  because the discrete Nvidia GPU (GTX 660M / Kepler) is too old for
+  modern NVENC and drivers.
 
 **Mode B — no Plex Pass (fallback).**
 The Plex container has no GPU access. Hardware acceleration is disabled in
@@ -353,11 +370,14 @@ gluetun config change:
 
 Minimal, scoped to a household single-host deployment:
 
-- `ufw` allows: SSH (22) from LAN, Plex (32400) from anywhere, all admin
-  ports (8989, 7878, 9696, 8080, 5055, 6767, 8181, 3000) from LAN only
-  (`192.168.x.0/24`).
+- `ufw` allows: Plex (32400) from anywhere, all admin ports (8989, 7878,
+  9696, 8080, 5055, 6767, 8181, 3000) from LAN only (`192.168.0.0/16`).
+  Default-deny on incoming, default-allow on outgoing. Logging at `low`.
 - `unattended-upgrades` enabled for OS security patches.
-- SSH key-based auth only; password auth disabled in `sshd_config`.
+- If `openssh-server` is installed for remote admin: add a `ufw allow from
+  192.168.0.0/16 to any port 22 proto tcp` rule, disable
+  `PasswordAuthentication` and `PermitRootLogin` in `sshd_config`. The
+  current host has no SSH server installed.
 - No fail2ban, no IDS, no log shipping. Not justified at this scale.
 
 ## 8. Backups and disaster recovery
@@ -418,6 +438,8 @@ explicit:
 | Notification channel: Discord webhook, ntfy, or email? | Operator | Open |
 | RAM upgrade: 8 GB → 16 GB now or wait? | Operator | Open (deferred per §4.1) |
 | Add Tailscale for remote admin? | Operator | Open (recommended optional add-on, §7.1) |
+| External 4 TB media HDD: model and purchase date? Until purchased, Phase 2+ deployment is blocked (no `/data` exists). | Operator | Open (2026-05-18 — drive not yet bought) |
+| Move host from Wi-Fi to wired Ethernet? Affects peak stream throughput. | Operator | Open |
 
 ## 12. Maintenance of this document
 
